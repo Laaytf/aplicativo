@@ -149,17 +149,56 @@ export default function FinancialPlatform() {
   useEffect(() => {
     if (user) {
       loadUserProfile()
-      loadCategories()
-      loadTransactions()
+      refreshDashboard()
     }
   }, [user])
 
-  // Recalcular gastos por categoria sempre que transactions ou categories mudarem
+  // Configurar Supabase Realtime
   useEffect(() => {
-    if (transactions.length > 0 && categories.length > 0) {
-      recalculateCategorySpending(transactions)
+    if (!user) return
+
+    // Subscription para categories
+    const categoriesChannel = supabase
+      .channel('categories-changes')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'categories',
+          filter: `user_id=eq.${user.id}`
+        },
+        (payload) => {
+          console.log('Category change detected:', payload)
+          refreshDashboard()
+        }
+      )
+      .subscribe()
+
+    // Subscription para transactions
+    const transactionsChannel = supabase
+      .channel('transactions-changes')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'transactions',
+          filter: `user_id=eq.${user.id}`
+        },
+        (payload) => {
+          console.log('Transaction change detected:', payload)
+          refreshDashboard()
+        }
+      )
+      .subscribe()
+
+    // Cleanup
+    return () => {
+      supabase.removeChannel(categoriesChannel)
+      supabase.removeChannel(transactionsChannel)
     }
-  }, [transactions, categories.length])
+  }, [user])
 
   const checkUser = async () => {
     try {
@@ -186,62 +225,46 @@ export default function FinancialPlatform() {
     })
   }
 
-  const loadCategories = async () => {
+  // ✨ FUNÇÃO CENTRAL DE ATUALIZAÇÃO DO DASHBOARD
+  const refreshDashboard = async () => {
     if (!user) return
-    
+
     try {
-      const { data, error } = await supabase
+      // 1. Buscar todas as categorias do usuário
+      const { data: categoriesData, error: categoriesError } = await supabase
         .from('categories')
         .select('*')
         .eq('user_id', user.id)
         .order('name')
 
-      if (error) throw error
-      
-      // Mapear dados para incluir spent calculado
-      const mappedCategories = (data || []).map((cat: any) => ({
-        id: cat.id,
-        name: cat.name,
-        budget: cat.budget || 0,
-        spent: 0, // Será calculado depois
-        color: cat.color || '#2F6F65',
-        icon: cat.icon || '💰'
-      }))
-      
-      setCategories(mappedCategories)
-    } catch (error) {
-      console.error('Erro ao carregar categorias:', error)
-      toast.error('Erro ao carregar categorias')
-    }
-  }
+      if (categoriesError) throw categoriesError
 
-  const loadTransactions = async () => {
-    if (!user) return
-    
-    try {
-      const { data, error } = await supabase
+      // 2. Buscar todas as transações do usuário (pelo menos do mês atual)
+      const startOfMonth = new Date()
+      startOfMonth.setDate(1)
+      startOfMonth.setHours(0, 0, 0, 0)
+
+      const { data: transactionsData, error: transactionsError } = await supabase
         .from('transactions')
         .select('*')
         .eq('user_id', user.id)
         .order('date', { ascending: false })
 
-      if (error) {
-        console.error('Erro na query:', error)
-        throw error
-      }
-      
-      // Se não houver dados, retornar array vazio sem erro
-      const transactionsData = data || []
-      
-      if (transactionsData.length === 0) {
-        setTransactions([])
-        return
-      }
-      
-      // Mapear dados para incluir nome da categoria
-      const mappedTransactions = transactionsData.map((t: any) => {
-        // Buscar categoria correspondente
-        const category = categories.find(cat => cat.id === t.category_id)
+      if (transactionsError) throw transactionsError
+
+      // 3. Mapear categorias
+      const mappedCategories = (categoriesData || []).map((cat: any) => ({
+        id: cat.id,
+        name: cat.name,
+        budget: cat.budget || 0,
+        spent: 0, // Será calculado a seguir
+        color: cat.color || '#2F6F65',
+        icon: cat.icon || '💰'
+      }))
+
+      // 4. Mapear transações
+      const mappedTransactions = (transactionsData || []).map((t: any) => {
+        const category = mappedCategories.find(cat => cat.id === t.category_id)
         
         return {
           id: t.id,
@@ -257,22 +280,10 @@ export default function FinancialPlatform() {
           method: t.method || 'Não informado'
         }
       })
-      
-      setTransactions(mappedTransactions)
-    } catch (error) {
-      console.error('Erro ao carregar transações:', error)
-      toast.error('Erro ao carregar transações')
-      // Garantir que não quebre se houver erro
-      setTransactions([])
-    }
-  }
 
-  const recalculateCategorySpending = (transactionsList: Transaction[]) => {
-    const safeTransactions = transactionsList || []
-    
-    setCategories(prevCategories => {
-      return prevCategories.map(category => {
-        const totalSpent = safeTransactions
+      // 5. Recalcular gastos por categoria
+      const categoriesWithSpent = mappedCategories.map(category => {
+        const totalSpent = mappedTransactions
           .filter(t => t.type === 'expense' && t.category_id === category.id)
           .reduce((sum, t) => sum + t.amount, 0)
         
@@ -281,7 +292,16 @@ export default function FinancialPlatform() {
           spent: totalSpent
         }
       })
-    })
+
+      // 6. Atualizar estados
+      setCategories(categoriesWithSpent)
+      setTransactions(mappedTransactions)
+
+      console.log('Dashboard atualizado com sucesso!')
+    } catch (error) {
+      console.error('Erro ao atualizar dashboard:', error)
+      toast.error('Erro ao atualizar dados do dashboard')
+    }
   }
 
   const handleLogout = async () => {
@@ -347,7 +367,9 @@ export default function FinancialPlatform() {
       toast.success('Transação adicionada com sucesso!')
       setIsAddTransactionOpen(false)
       resetTransactionForm()
-      await loadTransactions()
+      
+      // ✨ Atualizar dashboard
+      await refreshDashboard()
     } catch (error) {
       console.error('Erro ao adicionar transação:', error)
       toast.error('Erro ao adicionar transação')
@@ -408,7 +430,9 @@ export default function FinancialPlatform() {
       setIsEditTransactionOpen(false)
       setTransactionToEdit(null)
       resetTransactionForm()
-      await loadTransactions()
+      
+      // ✨ Atualizar dashboard
+      await refreshDashboard()
     } catch (error) {
       console.error('Erro ao editar transação:', error)
       toast.error('Erro ao editar transação')
@@ -436,7 +460,9 @@ export default function FinancialPlatform() {
       toast.success('Transação excluída com sucesso!')
       setIsDeleteTransactionOpen(false)
       setTransactionToDelete(null)
-      await loadTransactions()
+      
+      // ✨ Atualizar dashboard
+      await refreshDashboard()
     } catch (error) {
       console.error('Erro ao excluir transação:', error)
       toast.error('Erro ao excluir transação')
@@ -467,7 +493,9 @@ export default function FinancialPlatform() {
       toast.success('Categoria criada com sucesso!')
       setIsAddCategoryOpen(false)
       resetCategoryForm()
-      await loadCategories()
+      
+      // ✨ Atualizar dashboard
+      await refreshDashboard()
     } catch (error) {
       console.error('Erro ao criar categoria:', error)
       toast.error('Erro ao criar categoria')
@@ -509,8 +537,9 @@ export default function FinancialPlatform() {
       setIsEditCategoryOpen(false)
       setCategoryToEdit(null)
       resetCategoryForm()
-      await loadCategories()
-      await loadTransactions()
+      
+      // ✨ Atualizar dashboard
+      await refreshDashboard()
     } catch (error) {
       console.error('Erro ao editar categoria:', error)
       toast.error('Erro ao editar categoria')
@@ -555,7 +584,9 @@ export default function FinancialPlatform() {
       toast.success('Categoria excluída com sucesso!')
       setIsDeleteCategoryOpen(false)
       setCategoryToDelete(null)
-      await loadCategories()
+      
+      // ✨ Atualizar dashboard
+      await refreshDashboard()
     } catch (error) {
       console.error('Erro ao excluir categoria:', error)
       toast.error('Erro ao excluir categoria')
