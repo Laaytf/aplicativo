@@ -1,5 +1,10 @@
 import "./globals.css";
 
+export const metadata = {
+  title: "FinanceControl",
+  description: "Controle financeiro pessoal",
+};
+
 export default function RootLayout({
   children,
 }: {
