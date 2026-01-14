@@ -1,23 +1,13 @@
-/** @type {import('next').NextConfig} */
-const nextConfig = {
-  eslint: {
-    ignoreDuringBuilds: true,
-  },
-  typescript: {
-    ignoreBuildErrors: true,
-  },
-  images: {
-    remotePatterns: [
-      {
-        protocol: "https",
-        hostname: "images.unsplash.com",
-      },
-      {
-        protocol: "https",
-        hostname: "unsplash.com",
-      },
-    ],
-  },
-};
+import "./globals.css";
 
-module.exports = nextConfig;
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="pt-BR">
+      <body>{children}</body>
+    </html>
+  );
+}
